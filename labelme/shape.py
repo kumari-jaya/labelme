@@ -1,27 +1,19 @@
 import copy
 import math
 
+import numpy as np
+import skimage.measure
 from qtpy import QtCore
 from qtpy import QtGui
 
-from labelme.logger import logger
 import labelme.utils
-
+from labelme.logger import logger
 
 # TODO(unknown):
 # - [opt] Store paths instead of creating new ones at each paint.
 
 
-DEFAULT_LINE_COLOR = QtGui.QColor(0, 255, 0, 128)  # bf hovering
-DEFAULT_FILL_COLOR = QtGui.QColor(0, 255, 0, 128)  # hovering
-DEFAULT_SELECT_LINE_COLOR = QtGui.QColor(255, 255, 255)  # selected
-DEFAULT_SELECT_FILL_COLOR = QtGui.QColor(0, 255, 0, 155)  # selected
-DEFAULT_VERTEX_FILL_COLOR = QtGui.QColor(0, 255, 0, 255)  # hovering
-DEFAULT_HVERTEX_FILL_COLOR = QtGui.QColor(255, 255, 255, 255)  # hovering
-
-
 class Shape(object):
-
     # Render handles as squares
     P_SQUARE = 0
 
@@ -35,12 +27,12 @@ class Shape(object):
     NEAR_VERTEX = 1
 
     # The following class variables influence the drawing of all shape objects.
-    line_color = DEFAULT_LINE_COLOR
-    fill_color = DEFAULT_FILL_COLOR
-    select_line_color = DEFAULT_SELECT_LINE_COLOR
-    select_fill_color = DEFAULT_SELECT_FILL_COLOR
-    vertex_fill_color = DEFAULT_VERTEX_FILL_COLOR
-    hvertex_fill_color = DEFAULT_HVERTEX_FILL_COLOR
+    line_color = None
+    fill_color = None
+    select_line_color = None
+    select_fill_color = None
+    vertex_fill_color = None
+    hvertex_fill_color = None
     point_type = P_ROUND
     point_size = 8
     scale = 1.0
@@ -53,6 +45,7 @@ class Shape(object):
         flags=None,
         group_id=None,
         description=None,
+        mask=None,
     ):
         self.label = label
         self.group_id = group_id
@@ -68,6 +61,7 @@ class Shape(object):
         self.flags = flags
         self.description = description
         self.other_data = {}
+        self.mask = mask
 
         self._highlightIndex = None
         self._highlightMode = self.NEAR_VERTEX
@@ -84,16 +78,17 @@ class Shape(object):
             # is used for drawing the pending line a different color.
             self.line_color = line_color
 
-    def setShapeRefined(self, points, point_labels, shape_type):
-        self._shape_raw = (self.points, self.point_labels, self.shape_type)
+    def setShapeRefined(self, shape_type, points, point_labels, mask=None):
+        self._shape_raw = (self.shape_type, self.points, self.point_labels)
+        self.shape_type = shape_type
         self.points = points
         self.point_labels = point_labels
-        self.shape_type = shape_type
+        self.mask = mask
 
     def restoreShapeRaw(self):
         if self._shape_raw is None:
             return
-        self.points, self.point_labels, self.shape_type = self._shape_raw
+        self.shape_type, self.points, self.point_labels = self._shape_raw
         self._shape_raw = None
 
     @property
@@ -112,6 +107,7 @@ class Shape(object):
             "circle",
             "linestrip",
             "points",
+            "mask",
         ]:
             raise ValueError("Unexpected shape_type: {}".format(value))
         self._shape_type = value
@@ -179,26 +175,52 @@ class Shape(object):
         return QtCore.QRectF(x1, y1, x2 - x1, y2 - y1)
 
     def paint(self, painter):
-        if self.points:
-            color = (
-                self.select_line_color if self.selected else self.line_color
-            )
-            pen = QtGui.QPen(color)
-            # Try using integer sizes for smoother drawing(?)
-            pen.setWidth(max(1, int(round(2.0 / self.scale))))
-            painter.setPen(pen)
+        if self.mask is None and not self.points:
+            return
 
+        color = self.select_line_color if self.selected else self.line_color
+        pen = QtGui.QPen(color)
+        # Try using integer sizes for smoother drawing(?)
+        pen.setWidth(max(1, int(round(2.0 / self.scale))))
+        painter.setPen(pen)
+
+        if self.mask is not None:
+            image_to_draw = np.zeros(self.mask.shape + (4,), dtype=np.uint8)
+            fill_color = (
+                self.select_fill_color.getRgb()
+                if self.selected
+                else self.fill_color.getRgb()
+            )
+            image_to_draw[self.mask] = fill_color
+            qimage = QtGui.QImage.fromData(labelme.utils.img_arr_to_data(image_to_draw))
+            painter.drawImage(
+                int(round(self.points[0].x())),
+                int(round(self.points[0].y())),
+                qimage,
+            )
+
+            line_path = QtGui.QPainterPath()
+            contours = skimage.measure.find_contours(np.pad(self.mask, pad_width=1))
+            for contour in contours:
+                contour += [self.points[0].y(), self.points[0].x()]
+                line_path.moveTo(contour[0, 1], contour[0, 0])
+                for point in contour[1:]:
+                    line_path.lineTo(point[1], point[0])
+            painter.drawPath(line_path)
+
+        if self.points:
             line_path = QtGui.QPainterPath()
             vrtx_path = QtGui.QPainterPath()
             negative_vrtx_path = QtGui.QPainterPath()
 
-            if self.shape_type == "rectangle":
+            if self.shape_type in ["rectangle", "mask"]:
                 assert len(self.points) in [1, 2]
                 if len(self.points) == 2:
                     rectangle = self.getRectFromLine(*self.points)
                     line_path.addRect(rectangle)
-                for i in range(len(self.points)):
-                    self.drawVertex(vrtx_path, i)
+                if self.shape_type == "rectangle":
+                    for i in range(len(self.points)):
+                        self.drawVertex(vrtx_path, i)
             elif self.shape_type == "circle":
                 assert len(self.points) in [1, 2]
                 if len(self.points) == 2:
@@ -213,10 +235,8 @@ class Shape(object):
                     self.drawVertex(vrtx_path, i)
             elif self.shape_type == "points":
                 assert len(self.points) == len(self.point_labels)
-                for i, (p, l) in enumerate(
-                    zip(self.points, self.point_labels)
-                ):
-                    if l == 1:
+                for i, point_label in enumerate(self.point_labels):
+                    if point_label == 1:
                         self.drawVertex(vrtx_path, i)
                     else:
                         self.drawVertex(negative_vrtx_path, i)
@@ -234,14 +254,11 @@ class Shape(object):
                     line_path.lineTo(self.points[0])
 
             painter.drawPath(line_path)
-            painter.drawPath(vrtx_path)
-            painter.fillPath(vrtx_path, self._vertex_fill_color)
-            if self.fill:
-                color = (
-                    self.select_fill_color
-                    if self.selected
-                    else self.fill_color
-                )
+            if vrtx_path.length() > 0:
+                painter.drawPath(vrtx_path)
+                painter.fillPath(vrtx_path, self._vertex_fill_color)
+            if self.fill and self.mask is None:
+                color = self.select_fill_color if self.selected else self.fill_color
                 painter.fillPath(line_path, color)
 
             pen.setColor(QtGui.QColor(255, 0, 0, 255))
@@ -289,6 +306,18 @@ class Shape(object):
         return post_i
 
     def containsPoint(self, point):
+        if self.mask is not None:
+            y = np.clip(
+                int(round(point.y() - self.points[0].y())),
+                0,
+                self.mask.shape[0] - 1,
+            )
+            x = np.clip(
+                int(round(point.x() - self.points[0].x())),
+                0,
+                self.mask.shape[1] - 1,
+            )
+            return self.mask[y, x]
         return self.makePath().contains(point)
 
     def getCircleRectFromLine(self, line):
@@ -302,7 +331,7 @@ class Shape(object):
         return rectangle
 
     def makePath(self):
-        if self.shape_type == "rectangle":
+        if self.shape_type in ["rectangle", "mask"]:
             path = QtGui.QPainterPath()
             if len(self.points) == 2:
                 rectangle = self.getRectFromLine(*self.points)

@@ -4,16 +4,14 @@ import threading
 import imgviz
 import numpy as np
 import onnxruntime
-import PIL.Image
-import skimage.measure
+import skimage
 
-from ...logger import logger
+from ..logger import logger
+from . import _utils
 
 
 class SegmentAnythingModel:
-    def __init__(self, name, encoder_path, decoder_path):
-        self.name = name
-
+    def __init__(self, encoder_path, decoder_path):
         self._image_size = 1024
 
         self._encoder_session = onnxruntime.InferenceSession(encoder_path)
@@ -47,9 +45,7 @@ class SegmentAnythingModel:
             )
             if len(self._image_embedding_cache) > 10:
                 self._image_embedding_cache.popitem(last=False)
-            self._image_embedding_cache[
-                self._image.tobytes()
-            ] = self._image_embedding
+            self._image_embedding_cache[self._image.tobytes()] = self._image_embedding
             logger.debug("Done computing image embedding.")
 
     def _get_image_embedding(self):
@@ -59,17 +55,19 @@ class SegmentAnythingModel:
         with self._lock:
             return self._image_embedding
 
-    def predict_polygon_from_points(self, points, point_labels):
-        image_embedding = self._get_image_embedding()
-        polygon = _compute_polygon_from_points(
+    def predict_mask_from_points(self, points, point_labels):
+        return _compute_mask_from_points(
             image_size=self._image_size,
             decoder_session=self._decoder_session,
             image=self._image,
-            image_embedding=image_embedding,
+            image_embedding=self._get_image_embedding(),
             points=points,
             point_labels=point_labels,
         )
-        return polygon
+
+    def predict_polygon_from_points(self, points, point_labels):
+        mask = self.predict_mask_from_points(points=points, point_labels=point_labels)
+        return _utils.compute_polygon_from_mask(mask=mask)
 
 
 def _compute_scale_to_resize_image(image_size, image):
@@ -121,13 +119,7 @@ def _compute_image_embedding(image_size, encoder_session, image):
     return image_embedding
 
 
-def _get_contour_length(contour):
-    contour_start = contour
-    contour_end = np.r_[contour[1:], contour[0:1]]
-    return np.linalg.norm(contour_end - contour_start, axis=1).sum()
-
-
-def _compute_polygon_from_points(
+def _compute_mask_from_points(
     image_size, decoder_session, image, image_embedding, points, point_labels
 ):
     input_point = np.array(points, dtype=np.float32)
@@ -136,9 +128,9 @@ def _compute_polygon_from_points(
     onnx_coord = np.concatenate([input_point, np.array([[0.0, 0.0]])], axis=0)[
         None, :, :
     ]
-    onnx_label = np.concatenate([input_label, np.array([-1])], axis=0)[
-        None, :
-    ].astype(np.float32)
+    onnx_label = np.concatenate([input_label, np.array([-1])], axis=0)[None, :].astype(
+        np.float32
+    )
 
     scale, new_height, new_width = _compute_scale_to_resize_image(
         image_size=image_size, image=image
@@ -163,26 +155,12 @@ def _compute_polygon_from_points(
     masks, _, _ = decoder_session.run(None, decoder_inputs)
     mask = masks[0, 0]  # (1, 1, H, W) -> (H, W)
     mask = mask > 0.0
-    if 0:
-        imgviz.io.imsave(
-            "mask.jpg", imgviz.label2rgb(mask, imgviz.rgb2gray(image))
-        )
 
-    contours = skimage.measure.find_contours(np.pad(mask, pad_width=1))
-    contour = max(contours, key=_get_contour_length)
-    polygon = skimage.measure.approximate_polygon(
-        coords=contour,
-        tolerance=np.ptp(contour, axis=0).max() / 100,
+    MIN_SIZE_RATIO = 0.05
+    skimage.morphology.remove_small_objects(
+        mask, min_size=mask.sum() * MIN_SIZE_RATIO, out=mask
     )
-    polygon = np.clip(polygon, (0, 0), (mask.shape[0] - 1, mask.shape[1] - 1))
-    polygon = polygon[:-1]  # drop last point that is duplicate of first point
-    if 0:
-        image_pil = PIL.Image.fromarray(image)
-        imgviz.draw.line_(image_pil, yx=polygon, fill=(0, 255, 0))
-        for point in polygon:
-            imgviz.draw.circle_(
-                image_pil, center=point, diameter=10, fill=(0, 255, 0)
-            )
-        imgviz.io.imsave("contour.jpg", np.asarray(image_pil))
 
-    return polygon[:, ::-1]  # yx -> xy
+    if 0:
+        imgviz.io.imsave("mask.jpg", imgviz.label2rgb(mask, imgviz.rgb2gray(image)))
+    return mask

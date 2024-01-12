@@ -12,7 +12,6 @@ if os.name == "nt":  # Windows
 
 from . import __appname__
 
-
 COLORS = {
     "WARNING": "yellow",
     "INFO": "white",
@@ -51,10 +50,12 @@ class ColoredFormatter(logging.Formatter):
 
 
 logger = logging.getLogger(__appname__)
+logger.setLevel(logging.INFO)
 
 stream_handler = logging.StreamHandler(sys.stderr)
 handler_format = ColoredFormatter(
-    "[%(levelname2)s] %(module2)s:%(funcName2)s:%(lineno2)s - %(message2)s"
+    "%(asctime)s [%(levelname2)s] %(module2)s:%(funcName2)s:%(lineno2)s"
+    "- %(message2)s"
 )
 stream_handler.setFormatter(handler_format)
 

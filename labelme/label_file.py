@@ -6,12 +6,11 @@ import os.path as osp
 
 import PIL.Image
 
-from labelme import __version__
-from labelme.logger import logger
 from labelme import PY2
 from labelme import QT4
+from labelme import __version__
 from labelme import utils
-
+from labelme.logger import logger
 
 PIL.Image.MAX_IMAGE_PIXELS = None
 
@@ -33,7 +32,6 @@ class LabelFileError(Exception):
 
 
 class LabelFile(object):
-
     suffix = ".json"
 
     def __init__(self, filename=None):
@@ -84,6 +82,7 @@ class LabelFile(object):
             "shape_type",
             "flags",
             "description",
+            "mask",
         ]
         try:
             with open(filename, "r") as f:
@@ -112,9 +111,8 @@ class LabelFile(object):
                     flags=s.get("flags", {}),
                     description=s.get("description"),
                     group_id=s.get("group_id"),
-                    other_data={
-                        k: v for k, v in s.items() if k not in shape_keys
-                    },
+                    mask=utils.img_b64_to_arr(s["mask"]) if s.get("mask") else None,
+                    other_data={k: v for k, v in s.items() if k not in shape_keys},
                 )
                 for s in data["shapes"]
             ]

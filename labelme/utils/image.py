@@ -34,15 +34,15 @@ def img_pil_to_data(img_pil):
 
 
 def img_arr_to_b64(img_arr):
-    img_pil = PIL.Image.fromarray(img_arr)
-    f = io.BytesIO()
-    img_pil.save(f, format="PNG")
-    img_bin = f.getvalue()
-    if hasattr(base64, "encodebytes"):
-        img_b64 = base64.encodebytes(img_bin)
-    else:
-        img_b64 = base64.encodestring(img_bin)
+    img_data = img_arr_to_data(img_arr)
+    img_b64 = base64.b64encode(img_data).decode("utf-8")
     return img_b64
+
+
+def img_arr_to_data(img_arr):
+    img_pil = PIL.Image.fromarray(img_arr)
+    img_data = img_pil_to_data(img_pil)
+    return img_data
 
 
 def img_data_to_png_data(img_data):
@@ -72,11 +72,7 @@ def apply_exif_orientation(image):
     if exif is None:
         return image
 
-    exif = {
-        PIL.ExifTags.TAGS[k]: v
-        for k, v in exif.items()
-        if k in PIL.ExifTags.TAGS
-    }
+    exif = {PIL.ExifTags.TAGS[k]: v for k, v in exif.items() if k in PIL.ExifTags.TAGS}
 
     orientation = exif.get("Orientation", None)
 
